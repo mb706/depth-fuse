@@ -424,7 +424,7 @@ class InfoCache:
 
         attr['st_blocks'] = (attr['st_size'] + self.filecache.blocksize - 1) // self.filecache.blocksize
 
-        is_dir = json['entry_type'] == 'folder',
+        is_dir = json['entry_type'] == 'folder'
         entry = {
             'created': datetime.now(),
             'id': json['entry_id'],
@@ -438,7 +438,7 @@ class InfoCache:
         }
         self.filecache.notify_update(entry)
         self.log.debug("_file_to_cache_entry(): returning %s", (json['entry_path'], {'id': entry['id'], 'is_folder': is_dir}))
-        return (json['entry_path'], entry)
+        return (json['entry_path'].rstrip("/"), entry)
 
     def _dir_to_cache_entry(self, json_col, path):
         """
@@ -485,6 +485,15 @@ class InfoCache:
         self.cache.update(self._file_to_cache_entry(obj) for obj in objects)
         self.log.debug("_fill_cache('%s') successful", path)
 
+    def _root_cache(self):
+        self.log.debug("_root_cache()")
+        response = self.dptconn._try_dpt(lambda: self.dptconn.dpt._get_endpoint("/folders/root"))
+        if not response.ok or 'entry_id' not in response.json():
+            self.log.error("_root_cache() raising EIO: _get_endpoint('/folders/root') failed: %s", response.json())
+            raise FuseOSError(EIO)
+        self.cache.update([self._file_to_cache_entry(response.json())])
+        self.log.debug("_root_cache()")
+
     def _get_cache_if_any(self, path):
         self.log.debug("_get_cache_if_any('%s')", path)
         if path not in self.cache:
@@ -508,9 +517,13 @@ class InfoCache:
             self.log.debug("_get_cache('%s'): returning found cache entry", path)
             return fromcache
         if consider_refresh:
-            basename = path.rsplit("/", 1)[0]
-            self.log.debug("_get_cache('%s'): no cache entry found, so filling cache for directory '%s'", path, basename)
-            self._fill_cache(basename)
+            if "/" not in path:
+                self.log.debug("_get_cache('%s'): no cache entry found; calling special purpose function _root_cache()", path)
+                self._root_cache()
+            else:
+                basename = path.rsplit("/", 1)[0]
+                self.log.debug("_get_cache('%s'): no cache entry found, so filling cache for directory '%s'", path, basename)
+                self._fill_cache(basename)
             fromcache = self._get_cache_if_any(path)
             if fromcache is not None:
                 self.log.debug("_get_cache('%s'): returning cache entry newly created by _fill_cache", path)
@@ -549,19 +562,19 @@ class DptFs(Operations, LoggingMixIn):
 
     tmpdir: directory where local copies of remote are saved
     '''
-# notes:
-# - delegate permissions checking to kernel by passing `default_permissions` to fuse_new
-# - FUSE_CAP_HANDLE_KILLPRIV disabled: truncate must reset setuid / setgid bits
-# functions:
+    # notes:
+    # - delegate permissions checking to kernel by passing `default_permissions` to fuse_new
+    # - FUSE_CAP_HANDLE_KILLPRIV disabled: truncate must reset setuid / setgid bits
+    # functions:
 
-# how things should work
-# - open loads file to cache
-# - everything maps to that cached file
-# - fsync writes file to device (?)
-# - release writes file to device, flags it as can-be-deleted
-#   - delete lru file if using too much cache
-# - destroy deletes cache
-# - '°' as escape character: °°.pdf --> °.pdf, °.pdf --> removed
+    # how things should work
+    # - open loads file to cache
+    # - everything maps to that cached file
+    # - fsync writes file to device (?)
+    # - release writes file to device, flags it as can-be-deleted
+    #   - delete lru file if using too much cache
+    # - destroy deletes cache
+    # - '°' as escape character: °°.pdf --> °.pdf, °.pdf --> removed
 
     dptlog = logging.getLogger("fuse.dptfs")
     def __init__(self, dptconn, filecache, infocache):
@@ -570,9 +583,9 @@ class DptFs(Operations, LoggingMixIn):
         self.infocache = infocache
         self.dptlog.info("initializing DptFs")
 
-################################################
-# FS Global Operations                         #
-################################################
+    ################################################
+    # FS Global Operations                         #
+    ################################################
 
     def init(self, path):
         '''
@@ -622,9 +635,9 @@ class DptFs(Operations, LoggingMixIn):
         })
         return stat
 
-################################################
-# File Operations                              #
-################################################
+    ################################################
+    # File Operations                              #
+    ################################################
 
     def create(self, path, mode, fi=None):
         '''
@@ -797,11 +810,11 @@ class DptFs(Operations, LoggingMixIn):
                 self.release(path, fh)
         return 0
 
-#  - mknod: create nodes except dir, symlink, regular-file (if create() is given) --> EINVAL
+    #  - mknod: create nodes except dir, symlink, regular-file (if create() is given) --> EINVAL
 
-################################################
-# Sync and Lock                                #
-################################################
+    ################################################
+    # Sync and Lock                                #
+    ################################################
 
     def fsync(self, path, datasync, fh):
         """
@@ -821,11 +834,11 @@ class DptFs(Operations, LoggingMixIn):
         self.filecache.write_back(fh[0])
         return 0
 
-#  - lock: ((ESSENTIAL)) file locking; done by kernel if not given
+    #  - lock: ((ESSENTIAL)) file locking; done by kernel if not given
 
-################################################
-# Dir Operations                               #
-################################################
+    ################################################
+    # Dir Operations                               #
+    ################################################
 
     def mkdir(self, path, mode):
         '''
@@ -868,8 +881,8 @@ class DptFs(Operations, LoggingMixIn):
         self.filecache.delete_file(newentry)
         return 0
 
-#  - opendir: ESSENTIAL
-#  - releasedir: ESSENTIAL: release directory
+    #  - opendir: ESSENTIAL
+    #  - releasedir: ESSENTIAL: release directory
 
     def readdir(self, path, fh):
         '''
@@ -881,31 +894,31 @@ class DptFs(Operations, LoggingMixIn):
         self.dptlog.debug("readdir('%s', fh = %s) files: %s", path, fh, entries)
         return entries
 
-#  - fsyncdir: ESSENTIAL synch dir contents; if (datasync) --> only user data, not metadata
+    #  - fsyncdir: ESSENTIAL synch dir contents; if (datasync) --> only user data, not metadata
 
-################################################
-# Permissions                                  #
-################################################
+    ################################################
+    # Permissions                                  #
+    ################################################
 
-def chmod(self, path, uid, gid):
-    '''
-    - chmod: change permissions of file
-    '''
-    self.dptlog.warning("chmod('%s'): raising EPERM (permissions not supported)", path)
-    raise FuseOSError(EPERM)
+    def chmod(self, path, uid, gid):
+        '''
+        - chmod: change permissions of file
+        '''
+        self.dptlog.warning("chmod('%s'): raising EPERM (permissions not supported)", path)
+        raise FuseOSError(EPERM)
 
-def chown(self, path, uid, gid):
-    '''
-    - chown: change owner / group of file
-    '''
-    self.dptlog.warning("chown('%s'): raising EPERM (permissions not supported)", path)
-    raise FuseOSError(EPERM)
+    def chown(self, path, uid, gid):
+        '''
+        - chown: change owner / group of file
+        '''
+        self.dptlog.warning("chown('%s'): raising EPERM (permissions not supported)", path)
+        raise FuseOSError(EPERM)
 
-#  - access: ESSENTIAL check access permissions, not called if default_permissions mount option given
+    #  - access: ESSENTIAL check access permissions, not called if default_permissions mount option given
 
-################################################
-# Attributes                                   #
-################################################
+    ################################################
+    # Attributes                                   #
+    ################################################
 
     def getattr(self, path, fh=None):
         '''
@@ -938,14 +951,14 @@ def chown(self, path, uid, gid):
         return 0
 
 
-#  - getxattr: get file extended attributes. returns ENOTSUP by default, which is what we want.
-#  - setxattr: set extended attributes. returns ENOTSUP by default, which is what we want.
-#  - removexattr: remove extended attribute. returns ENOTSUP by default, which is what we want.
-#  - listxattr: list extended attributes. returns empty list by default, which is what we want.
+    #  - getxattr: get file extended attributes. returns ENOTSUP by default, which is what we want.
+    #  - setxattr: set extended attributes. returns ENOTSUP by default, which is what we want.
+    #  - removexattr: remove extended attribute. returns ENOTSUP by default, which is what we want.
+    #  - listxattr: list extended attributes. returns empty list by default, which is what we want.
 
-################################################
-# Links                                        #
-################################################
+    ################################################
+    # Links                                        #
+    ################################################
 
     def symlink(self, target, source):
         '''
@@ -971,13 +984,13 @@ def chown(self, path, uid, gid):
         self.dptlog.warning("readlink('%s'): raising EIO (links not supported)", path)
         raise FuseOSError(EIO)
 
-################################################
-# Others: Not Implemented                      #
-################################################
+    ################################################
+    # Others: Not Implemented                      #
+    ################################################
 
-#  - bmap: map block idx within file to device
-# - ioctl: ioctl. apparently not used in python fuse
-# - poll: poll for io readiness; should call fuse_notify_poll. apparently not used in python fuse
+    #  - bmap: map block idx within file to device
+    # - ioctl: ioctl. apparently not used in python fuse
+    # - poll: poll for io readiness; should call fuse_notify_poll. apparently not used in python fuse
 
 
 if __name__ == '__main__':
