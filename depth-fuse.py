@@ -11,7 +11,7 @@ import argparse
 from datetime import datetime
 
 from dptrp1.dptrp1 import DigitalPaper, ResolveObjectFailed
-from fuse import FUSE, FuseOSError, Operations
+from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 from errno import *
 from urllib.parse import quote_plus
 
@@ -65,8 +65,11 @@ class FileCache:
         self.directory = {}
         self.dptconn = dptconn
         self.tmpdir = tmpdir
-        os.makedirs(self.tmpdir)
-        self.blocksize = os.statvfs(self.tmpdir)['f_bsize']
+        try:
+            os.makedirs(self.tmpdir)
+        except FileExistsError:
+            pass
+        self.blocksize = os.statvfs(self.tmpdir).f_bsize
         self.log.info("Initializing FileCache, tmpdir: %s", tmpdir)
 
     def create_file(self, path):
@@ -106,6 +109,8 @@ class FileCache:
         except:
             try:
                 os.remove(localfile)
+            except:
+                pass
             raise
         self.directory[docid] = {
             "id": docid,
@@ -442,11 +447,11 @@ class InfoCache:
         is_dir = [x['entry_type'] == 'folder' for x in json_col]
         if not all(x.startswith(path) for x in allpaths):
             self.log.error("_dir_to_cache_entry(path = '%s') raising EIO: sub-paths found that do not start with path: %s",
-                           path, [x for x in allpaths if not x.startswith(path)])
+                           path, [x for x in allpaths if not x.startswith(path)], stack_info = True)
             raise FuseOSError(EIO)
         if any("/" in x[len(path):] for x in allpaths):
             self.log.error("_dir_to_cache_entry(path = '%s') raising EIO: sub-paths found that are not immediately below path: %s",
-                           path, [x for x in allpaths if "/" in x[len(path):]])
+                           path, [x for x in allpaths if "/" in x[len(path):]], stack_info = True)
             raise FuseOSError(EIO)
 
         entry = {
@@ -513,7 +518,8 @@ class InfoCache:
         if is_dir is None:
             self.log.debug("get_file('%s', is_dir = %s): first trying as directory", path, is_dir)
             normpath = self._normalize_path(path, is_dir = True)
-            return self._get_cache(normpath)
+            try:
+                return self._get_cache(normpath)
             except FuseOSError as e:
                 if e.errno != ENOENT:
                     self.log.debug("get_file('%s', is_dir = %s): re-raising error %s", path, is_dir, e)
@@ -586,7 +592,8 @@ class DptFs(Operations, LoggingMixIn):
         - statfs: get fs statistics; dictionary with keys from statvfs C structure
         '''
         self.dptlog.info("statfs('%s')", path)
-        stat = os.statvfs(self.filecache.tmpdir)
+        protostat = os.statvfs(self.filecache.tmpdir)
+        stat = dict((key, getattr(protostat, key)) for key in ('f_bsize', 'f_favail', 'f_ffree', 'f_frsize', 'f_namemax'))
         try:
             storage = self.dptconn._try_dpt(lambda: self.dptconn.dpt.get_storage())
         except ResolveObjectFailed as e:
@@ -604,7 +611,8 @@ class DptFs(Operations, LoggingMixIn):
             f_bfree: storage['available'] // stat['f_bsize'],  # free blocks in fs
             f_blocks: storage['capacity'] // stat['f_bsize'],  # total blocks in fs
             f_files: numfiles,  # total file nodes / files in fs
-            f_flags: 0,  # ignored
+            f_flag: 0,  # ignored
+            f_fsid: '', # ignored
         })
         return stat
 
@@ -863,7 +871,7 @@ class DptFs(Operations, LoggingMixIn):
         - readdir: read directory; can get complicated
         '''
         self.dptlog.info("readdir('%s', fh = %s)", path, fh)
-        entries = ['.', '..'] + get_dir(path)['filenames']
+        entries = ['.', '..'] + self.infocache.get_dir(path)['filenames']
         self.dptlog.debug("readdir('%s', fh = %s) files: %s", path, fh, entries)
         return entries
 
@@ -967,40 +975,48 @@ def chown(self, path, uid, gid):
 
 
 if __name__ == '__main__':
+    logging.basicConfig()
+    
     parser = argparse.ArgumentParser(description = "DPT-* Fuse Mount")
     parser.add_argument('-d', '--dptclient', metavar="CLIENTFILE", default = '.dpt-client',
                         type = argparse.FileType('r'), help='.dpt-client file')
     parser.add_argument('-k', '--key', metavar="KEYFILE", default = '.dpt-key',
                         type = argparse.FileType('r'), help='.dpt-key file')
-    parser.add_argument('-a', '--address', metavar="ADDRESS", help = 'Dpt Address')
-    parser.add_argument('-m', '--mountpoint', metavar="MOUNTPOINT", help = 'Mount Point')
-    parser.add_argument('-c', '--cachedir', metavar="CACHEDIR", help = 'Local Cache Directory')
-    parser.add_argument('-l', '--lifetime', metavar="LIFETIME", type = 'float', default = 60, help = 'Cache Lifetime, in seconds.')
+    parser.add_argument("ADDRESS", help = 'Dpt Address')
+    parser.add_argument("CACHEDIR", help = 'Local Cache Directory')
+    parser.add_argument("MOUNTPOINT", help = 'Mount Point')
+    parser.add_argument('-l', '--lifetime', metavar="LIFETIME", type = float, default = 60, help = 'Cache Lifetime, in seconds.')
+    parser.add_argument('-v', '--verbose', metavar="VERBOSITY",
+                        choices = ["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"],
+                        default = "WARNING", help = 'Debug Level')
 
     args = parser.parse_args()
 
-    clientidfile = args.CLIENTFILE
-    clientkeyfile = args.KEYFILE
+    logging.getLogger().setLevel(args.verbose)
+
+    clientidfile = args.dptclient
+    clientkeyfile = args.key
     address = args.ADDRESS
     dpt = DigitalPaper(address)
-    auth = [open(clientidfile).readline().strip(),
-            open(clientkeyfile).read()]
-    res = dpt.authenticate(*self.auth)
+    auth = [clientidfile.readline().strip(),
+            clientkeyfile.read()]
+    clientidfile.close()
+    clientkeyfile.close()
+    res = dpt.authenticate(*auth)
     if not res.ok:
         self.dptlog.error("Could not authenticate: %s", res.json())
         raise Exception("Authentication failed")
     mountpoint = args.MOUNTPOINT
     tmpdir = args.CACHEDIR
-    lifetime = args.LIFETIME
+    lifetime = args.lifetime
 
     dptconn = DptConn(dpt, auth)
     filecache = FileCache(dptconn, tmpdir)
     infocache = InfoCache(dptconn, filecache, lifetime)
 
-    ops = DptFs(dpt, dptconn, filecache, infocache)
+    ops = DptFs(dptconn, filecache, infocache)
 
     FUSE(ops, mountpoint,
          foreground=True,
          nothreads=True,
-         default_permissions = True,
-         allow_other = True)
+         default_permissions = True)
