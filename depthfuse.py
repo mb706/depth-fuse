@@ -330,14 +330,14 @@ class InfoCache:
             if not is_dir:
                 raise FuseOSError(EIO)
             path = path[:-1]
-        if path and path[0] == '/':
-            path = path[1:]
+        if path and path[0] != '/':
+            path = "/" + path
         if not is_dir:
             if path.lower().endswith("°.pdf"):
                 path = path[:-5] + "°" + path[-5:]
             elif not path.lower().endswith(".pdf"):
                 path = path + "°.pdf"
-        return "Document/" + path
+        return "Document" + path
 
     @staticmethod
     def _denormalize_path(path, is_dir = False):
@@ -399,21 +399,27 @@ class InfoCache:
         self.log.debug("_file_to_cache_entry()")
         # > If a field is meaningless or semi-meaningless (e.g., st_ino) then it should be set to 0 or given a "reasonable" value.
         attr = self.attr_proto.copy()
-        attr['st_size'] = int(json.get('file_size', '0')),
-        attr['st_ctime'] = self._date_to_epoch(json['created_date'])
-        attr['st_mtime'] = self._date_to_epoch(json.get('modified_date', json['created_date']))
+        try:
+            attr['st_size'] = int(json.get('file_size', '0'))
+            attr['st_ctime'] = self._date_to_epoch(json['created_date'])
+            attr['st_mtime'] = self._date_to_epoch(json.get('modified_date', json['created_date']))
 
-        if 'reading_date' in json:
-            attr['st_atime'] = self._date_to_epoch(json['reading_date'])
-        else:
-            attr['st_atime'] = attr['st_mtime']
+            if 'reading_date' in json:
+                attr['st_atime'] = self._date_to_epoch(json['reading_date'])
+            else:
+                attr['st_atime'] = attr['st_mtime']
+
+        except ValueError as e:
+            self.log.exception("_file_to_cache_entry() raising EIO: json info invalid: %s", json)
+            raise FuseOSError(EIO)
 
         if json['entry_type'] == 'folder':
             attr['st_mode'] = 0o755 | stat.S_IFDIR
             attr['st_nlink'] = 2
-        elif json['entry_type'] == 'normal':
+        elif json['entry_type'] == 'document':
             attr['st_mode'] = 0o644 | stat.S_IFREG
         else:
+            self.log.error("_file_to_cache_entry() raising EIO: json 'entry_type' info invalid: %s", json['entry_type'])
             raise FuseOSError(EIO)
 
         attr['st_blocks'] = (attr['st_size'] + self.filecache.blocksize - 1) // self.filecache.blocksize
@@ -475,9 +481,8 @@ class InfoCache:
                 raise FuseOSError(ENOENT)
             self.log.exception("_fill_cache('%s') raising EIO: list_objects_in_folder('%s') raised unexpected error", path, path)
             raise FuseOSError(EIO)
-        self._dir_to_cache_entry(objects, path)
-        for obj in objects:
-            self._file_to_cache_entry(obj)
+        self.cache.update([self._dir_to_cache_entry(objects, path)])
+        self.cache.update(self._file_to_cache_entry(obj) for obj in objects)
         self.log.debug("_fill_cache('%s') successful", path)
 
     def _get_cache_if_any(self, path):
@@ -510,7 +515,8 @@ class InfoCache:
             if fromcache is not None:
                 self.log.debug("_get_cache('%s'): returning cache entry newly created by _fill_cache", path)
                 return fromcache
-        self.log.info("_get_cache('%s') raising ENOENT: cache entry not found even after querying remote", path)
+        self.log.info("_get_cache('%s') raising ENOENT: cache entry not found %s",
+                      path, "even after querying remote" if consider_refresh else "(without refreshing)")
         raise FuseOSError(ENOENT)
 
     def get_file(self, path, is_dir = False):
