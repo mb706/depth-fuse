@@ -7,6 +7,7 @@ import stat
 import calendar
 import time
 import logging
+import argparse
 from datetime import datetime
 
 from dptrp1.dptrp1 import DigitalPaper, ResolveObjectFailed
@@ -30,7 +31,7 @@ class DptConn:
                 return ret
         except ResolveObjectFailed as e:
             if e.args[1] != "Authentication is required.":
-                self.log.debug("dpt raised error ('%s')", "', '".join(e.args))
+                self.log.debug("dpt raised error %s", e.args)
                 raise
         self.log.info("_try_dpt(): dpt reauth")
         self.dpt.authenticate(*self.auth)
@@ -966,16 +967,31 @@ def chown(self, path, uid, gid):
 
 
 if __name__ == '__main__':
-    clientidfile = '.dpt-client'
-    clientkeyfile = '.dpt-key'
-    address = sys.argv[1]
+    parser = argparse.ArgumentParser(description = "DPT-* Fuse Mount")
+    parser.add_argument('-d', '--dptclient', metavar="CLIENTFILE", default = '.dpt-client',
+                        type = argparse.FileType('r'), help='.dpt-client file')
+    parser.add_argument('-k', '--key', metavar="KEYFILE", default = '.dpt-key',
+                        type = argparse.FileType('r'), help='.dpt-key file')
+    parser.add_argument('-a', '--address', metavar="ADDRESS", help = 'Dpt Address')
+    parser.add_argument('-m', '--mountpoint', metavar="MOUNTPOINT", help = 'Mount Point')
+    parser.add_argument('-c', '--cachedir', metavar="CACHEDIR", help = 'Local Cache Directory')
+    parser.add_argument('-l', '--lifetime', metavar="LIFETIME", type = 'float', default = 60, help = 'Cache Lifetime, in seconds.')
+
+    args = parser.parse_args()
+
+    clientidfile = args.CLIENTFILE
+    clientkeyfile = args.KEYFILE
+    address = args.ADDRESS
     dpt = DigitalPaper(address)
     auth = [open(clientidfile).readline().strip(),
             open(clientkeyfile).read()]
-
-    mountpoint = "mount"
-    tmpdir = "/tmp/mount"
-    lifetime = 60
+    res = dpt.authenticate(*self.auth)
+    if not res.ok:
+        self.dptlog.error("Could not authenticate: %s", res.json())
+        raise Exception("Authentication failed")
+    mountpoint = args.MOUNTPOINT
+    tmpdir = args.CACHEDIR
+    lifetime = args.LIFETIME
 
     dptconn = DptConn(dpt, auth)
     filecache = FileCache(dptconn, tmpdir)
